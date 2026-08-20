@@ -8,6 +8,7 @@ import { createToolSieve, extractToolAwareOutput } from "./openai-tool-sieve.js"
 import { buildOpenAiPrompt } from "./openai-tool-prompt.js";
 import { ensureToolChoiceSatisfied, hasChatToolingRequest } from "./openai-tool-policy.js";
 import { createOpenAiError } from "./openai-error.js";
+import { rememberSession } from "./continue-service.js";
 
 function createCompletionId() {
   return `chatcmpl_${randomUUID()}`;
@@ -146,24 +147,42 @@ function writeSseChunk(response, payload) {
 export async function collectOpenAiResponse({
   account,
   body,
+  continueSessionId = null,
   deleteAfterFinish = false,
   ownerId,
   toolCallsEnabled = false
 }) {
   const requestOptions = resolveCompletionRequest({ body, ownerId, toolCallsEnabled });
-  const { content } = await collectCompletionContent({
+  const { content, sessionId: usedSessionId } = await collectCompletionContent({
     account,
+    continueSessionId,
     deleteAfterFinish,
     requestOptions
   });
 
-  return buildChatCompletionPayload(createCompletionId(), requestOptions, content);
+  const completionId = createCompletionId();
+  const payload = buildChatCompletionPayload(completionId, requestOptions, content);
+
+  // Register session for future continuation (unless incognito)
+  if (!deleteAfterFinish && usedSessionId) {
+    const responseId = rememberSession({
+      ownerId,
+      sessionId: usedSessionId,
+      accountId: account.id,
+      modelType: requestOptions.model.modelType,
+      prefix: content?.trimEnd?.() ?? ""
+    });
+    payload.response_id = responseId;
+  }
+
+  return payload;
 }
 
 export async function streamOpenAiResponse(options) {
   const {
     account,
     body,
+    continueSessionId = null,
     deleteAfterFinish = false,
     ownerId,
     response,
@@ -176,6 +195,7 @@ export async function streamOpenAiResponse(options) {
     : null;
   let toolCallIndex = 0;
   let sawToolCall = false;
+  let accumulatedContent = "";
 
   response.writeHead(200, {
     "cache-control": "no-cache, no-transform",
@@ -205,10 +225,12 @@ export async function streamOpenAiResponse(options) {
     toolCallIndex += calls.length;
   };
 
-  await streamCompletionContent({
+  const { sessionId: usedSessionId } = await streamCompletionContent({
     account,
+    continueSessionId,
     deleteAfterFinish,
     onText: (delta) => {
+      accumulatedContent += delta;
       if (!toolSieve) {
         writeSseChunk(response, buildChunkPayload(
           completionId,
@@ -246,6 +268,7 @@ export async function streamOpenAiResponse(options) {
       }
 
       if (event.text) {
+        accumulatedContent += event.text;
         writeSseChunk(response, buildChunkPayload(
           completionId,
           requestOptions.model.id,
@@ -262,4 +285,15 @@ export async function streamOpenAiResponse(options) {
     sawToolCall ? "tool_calls" : "stop"
   ));
   response.end("data: [DONE]\n\n");
+
+  // Register session for future continuation (unless incognito)
+  if (!deleteAfterFinish && usedSessionId) {
+    rememberSession({
+      ownerId,
+      sessionId: usedSessionId,
+      accountId: account.id,
+      modelType: requestOptions.model.modelType,
+      prefix: accumulatedContent.trimEnd()
+    });
+  }
 }

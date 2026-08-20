@@ -38,7 +38,39 @@
 - 图片输入只允许 `deepseek-vision` 或 `deepseek-vision-reasoner`。
 - Expert 模型不允许文件或图片上传。
 - 工具调用由 prompt 与输出解析适配，不代表所有 OpenAI 工具调用边界行为都完全一致。
-- 当前未实现 Responses API、Embeddings、Audio 或 Files API。
+- 当前未实现 Embeddings、Audio 或 Files API。
+
+### `POST /v1/responses`（Responses API 兼容）
+
+将 OpenAI Responses API 请求转换为内部 chat 流程，并映射回 Responses 输出格式。支持流式（SSE）与非流式。
+
+请求体支持：
+
+- `input`：字符串，或 `{role, content}` / `{type: "function_call_output"}` 数组
+- `instructions`：作为首条 system 消息前置
+- `model`
+- `tools` 与 `tool_choice`（受 API Key 工具开关约束）
+- `stream: true | false`
+
+非流式示例：
+
+```bash
+curl http://127.0.0.1:3000/v1/responses \
+  -H "Authorization: Bearer YOUR_LOCAL_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-chat",
+    "input": "解释快速排序"
+  }'
+```
+
+### 会话前缀匹配继续（continue）
+
+响应会返回一个 `response_id` 字段，用于后续继续：
+
+- **显式继续**：请求体携带 `previous_response_id`（Responses API）或 `continue_from`（Chat Completions），即可在同一 DeepSeek 会话上调用 `/chat/continue` 延伸上次回复。
+- **前缀匹配自动继续**：若请求的开头用户消息与之前响应的尾部前缀匹配，将自动复用到对应会话继续生成，无需显式指定。
+- 会话注册为进程内临时状态，30 分钟自动过期，按 owner 隔离；无痕（incognito）模式下不注册。单次请求的继续会使用原 account 以保证会话有效。
 
 非流式示例：
 

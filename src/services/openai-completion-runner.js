@@ -3,9 +3,12 @@ import { createChatSession, deleteChatSession } from "./chat-session-service.js"
 import { uploadOpenAiVisionFiles } from "./deepseek-file-service.js";
 import { proxyDeepseekRequest } from "./deepseek-proxy.js";
 
-const THINK_OPEN_TAG = "<think>";
-const THINK_CLOSE_TAG = "</think>";
+const THINK_OPEN_TAG = " \u003cthinking";
+const THINK_CLOSE_TAG = " \u003c/thinking\u003e\n\n";
 
+/**
+ * Start a new chat completion in a session.
+ */
 function startCompletion({ account, requestOptions, sessionId }) {
   return proxyDeepseekRequest({
     account,
@@ -21,6 +24,28 @@ function startCompletion({ account, requestOptions, sessionId }) {
         thinking_enabled: requestOptions.model.thinkingEnabled,
         search_enabled: requestOptions.model.searchEnabled,
         action: null,
+        preempt: false
+      })
+    ),
+    headers: { "content-type": "application/json" }
+  });
+}
+
+/**
+ * Continue the last assistant response in an existing session.
+ * Uses the DeepSeek /chat/continue endpoint to extend the last response.
+ */
+function continueCompletion({ account, requestOptions, sessionId }) {
+  return proxyDeepseekRequest({
+    account,
+    method: "POST",
+    path: "/chat/continue",
+    body: Buffer.from(
+      JSON.stringify({
+        chat_session_id: sessionId,
+        model_type: requestOptions.model.modelType,
+        thinking_enabled: requestOptions.model.thinkingEnabled,
+        search_enabled: requestOptions.model.searchEnabled,
         preempt: false
       })
     ),
@@ -104,7 +129,27 @@ async function consumeTaggedStream(stream, onText) {
   }
 }
 
-async function withCompletionSession({ account, deleteAfterFinish, onComplete }) {
+/**
+ * Run a completion (or continue) within a session context.
+ *
+ * If `continueSessionId` is provided, reuses that session and calls
+ * /chat/continue to extend the last assistant response. Otherwise
+ * creates a new session.
+ *
+ * @param {Object} options
+ * @param {Object} options.account
+ * @param {boolean} [options.deleteAfterFinish=false]
+ * @param {function(string): Promise<{content: string, sessionId: string}>} options.onComplete
+ *        Called with the sessionId. Must return {content, sessionId}.
+ * @param {string} [options.continueSessionId] If set, continue this session instead of creating a new one.
+ * @returns {Promise<{content: string, sessionId: string}>}
+ */
+async function withCompletionSession({ account, continueSessionId, deleteAfterFinish, onComplete }) {
+  if (continueSessionId) {
+    // Continue mode: reuse the provided session, don't create or delete
+    return onComplete(continueSessionId);
+  }
+
   const sessionId = await createChatSession(account);
 
   try {
@@ -116,32 +161,63 @@ async function withCompletionSession({ account, deleteAfterFinish, onComplete })
   }
 }
 
-export async function collectCompletionContent({ account, deleteAfterFinish = false, requestOptions }) {
+export async function collectCompletionContent({
+  account,
+  continueSessionId = null,
+  deleteAfterFinish = false,
+  requestOptions
+}) {
   return withCompletionSession({
     account,
+    continueSessionId,
     deleteAfterFinish,
     onComplete: async (sessionId) => {
-      const preparedOptions = await prepareRequestOptions({ account, requestOptions, sessionId });
-      const { response } = await startCompletion({ account, requestOptions: preparedOptions, sessionId });
       let content = "";
 
-      await consumeTaggedStream(response.body, (text) => {
-        content += text;
-      });
+      if (continueSessionId) {
+        // Continue mode: use /chat/continue
+        const preparedOptions = await prepareRequestOptions({ account, requestOptions, sessionId });
+        const { response } = await continueCompletion({ account, requestOptions: preparedOptions, sessionId });
+        await consumeTaggedStream(response.body, (text) => {
+          content += text;
+        });
+      } else {
+        // New completion: create session and run /chat/completion
+        const preparedOptions = await prepareRequestOptions({ account, requestOptions, sessionId });
+        const { response } = await startCompletion({ account, requestOptions: preparedOptions, sessionId });
+        await consumeTaggedStream(response.body, (text) => {
+          content += text;
+        });
+      }
 
-      return { content };
+      return { content, sessionId };
     }
   });
 }
 
-export async function streamCompletionContent({ account, deleteAfterFinish = false, onText, requestOptions }) {
+export async function streamCompletionContent({
+  account,
+  continueSessionId = null,
+  deleteAfterFinish = false,
+  onText,
+  requestOptions
+}) {
   return withCompletionSession({
     account,
+    continueSessionId,
     deleteAfterFinish,
     onComplete: async (sessionId) => {
-      const preparedOptions = await prepareRequestOptions({ account, requestOptions, sessionId });
-      const { response } = await startCompletion({ account, requestOptions: preparedOptions, sessionId });
-      await consumeTaggedStream(response.body, onText);
+      if (continueSessionId) {
+        const preparedOptions = await prepareRequestOptions({ account, requestOptions, sessionId });
+        const { response } = await continueCompletion({ account, requestOptions: preparedOptions, sessionId });
+        await consumeTaggedStream(response.body, onText);
+      } else {
+        const preparedOptions = await prepareRequestOptions({ account, requestOptions, sessionId });
+        const { response } = await startCompletion({ account, requestOptions: preparedOptions, sessionId });
+        await consumeTaggedStream(response.body, onText);
+      }
+
+      return { sessionId };
     }
   });
 }

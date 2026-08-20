@@ -23,7 +23,7 @@ flowchart LR
 
 - `/api/*`：公共认证、本地用户、账号、密钥和管理员接口。
 - `/proxy/*`：需要会话 Cookie 的 DeepSeek Web 白名单代理。
-- `/v1/*`、`/models`：需要本地 Bearer API Key 的 OpenAI 兼容接口。
+- `/v1/*`、`/models`：需要本地 Bearer API Key 的 OpenAI 兼容接口，包括 `/v1/chat/completions` 与 `/v1/responses`。
 - 其他路径：从 `public/` 提供静态资源。
 
 服务统一处理 CORS 预检、Cookie 解析、错误响应和静态资源缓存头。
@@ -43,7 +43,8 @@ flowchart LR
 - 认证与所有权：`auth-service.js`、`user-service.js`、`session-service.js`。
 - 账号与密钥：`account-service.js`、`api-key-service.js`、`account-rotation-service.js`。
 - 上游协议：`deepseek-proxy.js`、`deepseek-protocol.js`、`deepseek-device.js`。
-- OpenAI 桥接：`openai-bridge.js`、`openai-completion-runner.js`、工具调用相关服务。
+- OpenAI 桥接：`openai-bridge.js`、`openai-completion-runner.js`、`openai-responses.js`（Responses API 兼容）、工具调用相关服务。
+- 会话继续：`continue-service.js` 记录响应到 DeepSeek 会话的映射，支持显式 `previous_response_id` 与前缀匹配自动继续。
 - 风控：`pow-solver.js`、`captcha-service.js`、`deepseek-settings.js`。
 - 策略：请求限制、无痕模式、共享账号模式和专家提示词覆写。
 
@@ -74,8 +75,9 @@ flowchart LR
 3. 根据普通模式或共享账号模式选择可用账号。
 4. 校验模型、搜索选项、工具调用权限和图片输入。
 5. 把 OpenAI messages 转换为上游 prompt，必要时上传图片。
-6. 调用 DeepSeek Web completion，并转换为非流式 JSON 或 SSE chunk。
-7. 更新 API Key 当日使用量和内存请求日志；无痕模式下删除上游会话。
+6. 尝试会话继续：优先解析 `previous_response_id` / `continue_from`，其次对开头用户消息做前缀匹配；命中则调用 DeepSeek `/chat/continue` 复用会话，否则新建会话并调用 `/chat/completion`。
+7. 把上游结果转换为非流式 JSON 或 SSE chunk（chat 或 Responses 格式）。
+8. 更新 API Key 当日使用量和内存请求日志；无痕模式下删除上游会话，否则注册会话供后续继续。
 
 ## 原生代理请求流
 
