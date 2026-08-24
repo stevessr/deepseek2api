@@ -5,7 +5,7 @@
 // / streamCompletionContent.
 //
 // Supported features:
-//  - Non-streaming (collect) and streaming (SSE) responses
+//  - Non-streaming (collect) and streaming (SSE or custom transport, e.g. WebSocket) responses
 //  - `input` (array of roles / function_call_output / string) -> messages
 //  - `instructions` -> prepended system message
 //  - `previous_response_id` -> session continue via continue-service
@@ -128,6 +128,31 @@ export function buildResponsesPayload(responseId, modelId, content, toolCalls) {
 function writeSseEvent(response, eventName, data) {
   response.write(`event: ${eventName}\n`);
   response.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+/**
+ * Transport adapter for streamResponsesResponse. The default transport writes
+ * Responses API events as an HTTP SSE body; WebSocket callers supply their own
+ * { start, emit, end } implementation.
+ */
+function createSseTransport(response) {
+  return {
+    start() {
+      response.writeHead(200, {
+        "cache-control": "no-cache, no-transform",
+        connection: "keep-alive",
+        "content-type": "text/event-stream; charset=utf-8",
+        "x-accel-buffering": "no"
+      });
+      response.flushHeaders?.();
+    },
+    emit(eventName, data) {
+      writeSseEvent(response, eventName, data);
+    },
+    end() {
+      response.end();
+    }
+  };
 }
 
 function createResponseCreatedEvent(responseId, modelId) {
@@ -343,7 +368,7 @@ export async function collectResponsesResponse({
     });
   }
 
-  return payload;
+  return { payload, responseId, usedSessionId, modelType: requestOptions.model.modelType };
 }
 
 // --------------------------------------------------------------------------
@@ -358,7 +383,9 @@ export async function streamResponsesResponse(options) {
     deleteAfterFinish = false,
     ownerId,
     response,
-    toolCallsEnabled = false
+    toolCallsEnabled = false,
+    // Optional transport override ({ start, emit, end }); defaults to SSE.
+    transport: transportOverride
   } = options;
 
   const internalBody = toInternalBody(body);
@@ -373,15 +400,10 @@ export async function streamResponsesResponse(options) {
   let sawToolCall = false;
   let accumulatedText = "";
 
-  response.writeHead(200, {
-    "cache-control": "no-cache, no-transform",
-    connection: "keep-alive",
-    "content-type": "text/event-stream; charset=utf-8",
-    "x-accel-buffering": "no"
-  });
-  response.flushHeaders?.();
+  const transport = transportOverride ?? createSseTransport(response);
+  transport.start();
 
-  const emitEvent = (eventName, data) => writeSseEvent(response, eventName, data);
+  const emitEvent = (eventName, data) => transport.emit(eventName, data);
 
   // Phase 1: response.created
   emitEvent("response.created", createResponseCreatedEvent(responseId, requestOptions.model.id));
@@ -437,8 +459,8 @@ export async function streamResponsesResponse(options) {
     }
   } catch (error) {
     emitEvent("response.failed", createResponseFailedEvent(responseId, requestOptions.model.id, error));
-    response.end();
-    return;
+    transport.end();
+    return { responseId, usedSessionId: null, modelType: requestOptions.model.modelType };
   }
 
   // Phase 6: output_text.done
@@ -453,7 +475,7 @@ export async function streamResponsesResponse(options) {
   // Phase 9: response.completed
   emitEvent("response.completed", createResponseCompletedEvent(responseId, requestOptions.model.id, accumulatedText, msgId));
 
-  response.end();
+  transport.end();
 
   // Register session for future continuation (unless incognito)
   if (!deleteAfterFinish && usedSessionId) {
@@ -465,4 +487,6 @@ export async function streamResponsesResponse(options) {
       prefix: accumulatedText.trimEnd()
     });
   }
+
+  return { responseId, usedSessionId, modelType: requestOptions.model.modelType };
 }

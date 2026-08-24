@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { config } from "./config.js";
 import { handleApiRequest } from "./routes/api-routes.js";
 import { handleOpenAiRequest } from "./routes/openai-routes.js";
+import { handleOpenAiUpgrade } from "./routes/openai-ws-routes.js";
 import { handleProxyRequest } from "./routes/proxy-routes.js";
 import { parseCookies, sendError, serveStaticFile } from "./utils/http.js";
 
@@ -52,6 +53,13 @@ const server = createServer(async (request, response) => {
     }
 
     sendError(response, 500, error.message);
+  }
+});
+
+server.on("upgrade", (request, socket, head) => {
+  if (!handleOpenAiUpgrade(request, socket, head)) {
+    socket.write("HTTP/1.1 404 Not Found\r\nconnection: close\r\n\r\n");
+    socket.destroy();
   }
 });
 

@@ -85,6 +85,47 @@ curl http://127.0.0.1:3000/v1/chat/completions \
   }'
 ```
 
+### `WS /v1/responses/ws`（Responses API WebSocket）
+
+在单个持久 WebSocket 连接上使用 Responses API，同一连接内的多轮请求自动延续同一 DeepSeek 会话，无需重发历史。握手即认证：
+
+- `Authorization: Bearer <本地 API Key>` 请求头，或
+- `?api_key=<本地 API Key>` / `?key=<本地 API Key>` 查询参数（浏览器端 WebSocket 无法自定义请求头时使用）
+
+认证失败时握手直接返回 HTTP 401。
+
+客户端消息（每条一个 JSON 文本帧）：
+
+| 消息 | 说明 |
+| --- | --- |
+| `{"type":"response.create","response":{...}}` | 发起一轮 Responses 请求，`response` 为标准 Responses 请求体 |
+| `{"model":"...","input":"..."}` | 裸请求体，等价于上面的信封 |
+| `{"type":"conversation.new"}` | 丢弃连接内记忆，下一轮开启全新 DeepSeek 会话 |
+| `{"type":"ping"}` | 心跳；服务端回 `{"type":"pong"}` |
+| `{"type":"pong"}` | 响应服务端 ping |
+
+会话延续规则（与 HTTP `previous_response_id` 语义一致）：
+
+- 请求体显式携带 `previous_response_id` / `continue_from` 时优先，按 30 分钟前缀注册表解析；
+- `new_conversation: true` 时强制新会话；
+- 其余情况自动延续本连接上一轮的 DeepSeek 会话（连接内记忆，进程重启即失效；无痕模式删除上游会话，不记录延续）。
+
+服务端消息：
+
+- 流式请求（`stream: true`）：每个 Responses SSE 事件原样转发为一条 JSON 文本消息（`response.created`、`response.output_text.delta`、`response.completed` 等）；
+- 非流式请求：回 `{"type":"response.completed","response":{...}}`；
+- 错误以事件内联返回：`{"type":"error","code":"...","status":...,"message":"..."}`，连接保持打开。`code` 取值：`bad_request`、`forbidden`、`not_found`、`rate_limited`、`busy`（上一轮未结束时再次发起，HTTP 409 语义）、`server_error`。
+
+示例（Node 内置 WebSocket 客户端）：
+
+```js
+const ws = new WebSocket("ws://127.0.0.1:3000/v1/responses/ws?key=YOUR_LOCAL_API_KEY");
+ws.onopen = () => ws.send(JSON.stringify({ model: "deepseek-chat", input: "解释快速排序" }));
+ws.onmessage = (event) => console.log(JSON.parse(event.data));
+```
+
+协议层：文本帧必须为合法 UTF-8 JSON；超过 4 MiB 的消息或协议违规会以相应关闭码（1009/1002/1007）关闭连接。其他路径的 WebSocket 升级请求返回 404。
+
 Vision 示例：
 
 ```json

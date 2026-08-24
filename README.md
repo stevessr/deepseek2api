@@ -9,7 +9,7 @@
 | 模块 | 能力 |
 | --- | --- |
 | 管理台 | 本地用户、DeepSeek 账号、API Key、聊天会话、邀请码和系统设置 |
-|| OpenAI 兼容层 | `GET /v1/models`、`POST /v1/chat/completions`、`POST /v1/responses`、流式输出、工具调用、图片输入、会话继续 |
+| OpenAI 兼容层 | `GET /v1/models`、`POST /v1/chat/completions`、`POST /v1/responses`、`WS /v1/responses/ws`、流式输出、工具调用、图片输入、会话继续 |
 | DeepSeek 代理层 | `/proxy/*` 白名单转发、PoW、验证码状态、token 刷新和请求上下文 |
 | 多用户控制 | 账号隔离、并发/频率限制、无痕模式、共享账号轮询 |
 | 本地存储 | 无外部数据库；运行时状态写入忽略提交的 `data/app.json` |
